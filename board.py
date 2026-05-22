@@ -26,7 +26,7 @@ class Board():
 
         if player not in (0,1):
             return MoveResult.INVALID_PLAYER
-        
+
         for i in range(6):
             if self.board[i][col] == "":
                 self.board[i][col] = self.players[player]
@@ -34,7 +34,7 @@ class Board():
                     return MoveResult.WIN
                 if self.if_draw():
                     return MoveResult.DRAW
-                
+
                 return MoveResult.CONTINUE
         return MoveResult.COL_FULL
 
@@ -44,10 +44,8 @@ class Board():
             (0, 1),
             (1, 1),
             (-1, 1),
-            (1, -1),
-            (-1, -1)
         ]
-    
+
         for dx, dy in directions:
             count = 1
 
@@ -62,12 +60,12 @@ class Board():
                 i += 1
             if count >= 4:
                 return 1
-    
+
         return 0
 
     def reset(self):
         self.board = [[""] * 7 for _ in range(6)]
-    
+
     def get_valid_cols(self):
         return [c for c in range(7) if self.board[5][c] == ""]
 
