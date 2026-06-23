@@ -1,175 +1,167 @@
-# train.py
-
-import os
+import copy
+import random
 
 import torch
 import torch.nn.functional as F
+import torch.optim as optim
 
-from tqdm import tqdm
-
-from network import ActorCriticNet
-from agent import A2CAgent, greedy_agent
-from selfplay import collect_episode
-from game_runner import evaluate
+from board import Board, MoveResult
+from minimax import best_move, get_legal_moves
+from network import ConnectFourNet
 
 
-GAMMA = 0.99
-LR = 3e-3
-
-C_VALUE = 0.6
-C_ENT = 0.02
-
-EPISODES = 2_000_000
-
-EVAL_EVERY = 500
-SAVE_EVERY = 5000
-
-
-def compute_returns(rewards):
-
-    G = 0
-    returns = []
-
-    for r in reversed(rewards):
-        G = r + GAMMA * G
-        returns.insert(0, G)
-
-    return torch.tensor(
-        returns,
-        dtype=torch.float32
-    )
+def encode_board(board, current_player):
+    """Encode board as float tensor from current player's perspective."""
+    flat = []
+    for row in board.get_board():
+        for cell in row:
+            if cell is None:
+                flat.append(0.0)
+            elif cell == current_player:
+                flat.append(1.0)
+            else:
+                flat.append(-1.0)
+    return torch.tensor(flat, dtype=torch.float32)
 
 
-def load_oldest_checkpoint(device):
+def was_blocking_move(board, col, opponent):
+    """Check if the move just played blocked the opponent from winning."""
+    test_board = copy.deepcopy(board)
 
-    checkpoints = sorted([
-        f for f in os.listdir("./checkpoints")
-        if f.startswith("ckpt_") and f.endswith(".pt")
-    ])
+    # Undo the move by setting the top-most piece in the column back to None
+    for r in range(5, -1, -1):
+        if test_board.get_board()[r][col] is not None:
+            test_board.get_board()[r][col] = None
+            break
 
-    if not checkpoints:
-        return None
-
-    old_net = ActorCriticNet().to(device)
-
-    old_net.load_state_dict(
-        torch.load(
-            "checkpoints/" + checkpoints[0],
-            map_location=device
-        )
-    )
-
-    old_net.eval()
-
-    return greedy_agent(old_net, device)
+    # Check if the opponent could have won there
+    result = test_board.make_move(opponent, col)
+    return result == MoveResult.WIN
 
 
-def train():
+def get_reward(result, board, col, player):
+    """Shaped reward: win, draw, block, or neutral."""
+    if result == MoveResult.WIN:
+        return 1.0
+    if result == MoveResult.DRAW:
+        return 0.3
 
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
+    opponent = "Y" if player == "R" else "R"
+    if was_blocking_move(board, col, opponent):
+        return 0.5
+    return 0.0
 
-    net = ActorCriticNet().to(device)
 
-    opt = torch.optim.Adam(
-        net.parameters(),
-        lr=LR,
-        weight_decay=1e-4
-    )
+def play_game(net, epsilon=0.1):
+    """
+    Play one game where the Neural Network plays against the Minimax algorithm.
+    Returns a list of (state_tensor, action, reward) tuples for the NN + winner.
+    """
+    board = Board()
+    history = []
+    current = "R"
 
-    agent = A2CAgent(
-        net,
-        temperature=1.0,
-        device=device
-    )
+    # Randomly assign the neural network to go first or second
+    nn_player = random.choice(["R", "Y"])
 
-    for ep in tqdm(range(EPISODES)):
+    while True:
+        legal_moves = get_legal_moves(board)
 
-        transitions = collect_episode(agent)
+        if current == nn_player:
+            state = encode_board(board, current)
 
-        log_probs = torch.stack([
-            t[0] for t in transitions
-        ])
+            # Epsilon-greedy action selection
+            if torch.rand(1).item() < epsilon:
+                action = random.choice(legal_moves)
+            else:
+                logits, _ = net(state)
+                # Network outputs 42 values, but we only have 7 valid columns.
+                # Mask out all invalid moves (everything beyond index 6, plus full columns)
+                mask = torch.full((42,), float("-inf"))
+                mask[legal_moves] = 0.0
 
-        values = torch.stack([
-            t[1] for t in transitions
-        ]).squeeze(-1)
+                probs = torch.softmax(logits + mask, dim=0)
+                action = torch.multinomial(probs, 1).item()
 
-        rewards = [
-            t[2] for t in transitions
-        ]
+            result = board.make_move(current, action)
+            reward = get_reward(result, board, action, current)
+            history.append((state, action, reward))
 
-        entropies = torch.stack([
-            t[3] for t in transitions
-        ])
+        else:
+            # Minimax turn
+            action = best_move(board, current)
+            if action is None:
+                action = random.choice(legal_moves)
 
-        returns = compute_returns(rewards).to(device)
+            result = board.make_move(current, action)
 
-        advantage = returns - values.detach()
+        # Check for game end
+        if result == MoveResult.WIN:
+            return history, current, nn_player
+        elif result == MoveResult.DRAW:
+            return history, None, nn_player
 
-        # normalize advantage only
-        if len(advantage) > 1:
-            advantage = (
-                advantage - advantage.mean()
-            ) / (
-                advantage.std() + 1e-8
-            )
+        # Switch turns
+        current = "Y" if current == "R" else "R"
 
-        loss_policy = -(
-            log_probs * advantage
-        ).mean()
 
-        loss_value = F.mse_loss(
-            values,
-            returns
-        )
+def train_step(net, optimizer, history, winner, nn_player):
+    """Update the network based on the NN's experience in one game."""
+    if not history:
+        return
 
-        loss_entropy = entropies.mean()
+    optimizer.zero_grad()
+    total_loss = torch.tensor(0.0, requires_grad=True)
 
-        loss = (
-            loss_policy
-            + C_VALUE * loss_value
-            - C_ENT * loss_entropy
-        )
+    for state, action, shaped_reward in history:
+        # Final outcome reward from the neural network's perspective
+        if winner is None:
+            outcome = 0.3  # draw
+        elif winner == nn_player:
+            outcome = 1.0
+        else:
+            outcome = -1.0
 
-        opt.zero_grad()
+        # Blend shaped reward with final outcome
+        reward = 0.6 * outcome + 0.4 * shaped_reward
 
-        loss.backward()
+        logits, value = net(state)
+        probs = torch.softmax(logits, dim=0)
+        log_prob = torch.log(probs[action] + 1e-8)
 
-        torch.nn.utils.clip_grad_norm_(
-            net.parameters(),
-            max_norm=0.5
+        advantage = reward - value.squeeze().detach()
+
+        policy_loss = -log_prob * advantage
+        value_loss = F.mse_loss(
+            value.squeeze(), torch.tensor(reward, dtype=torch.float32)
         )
 
-        opt.step()
+        total_loss = total_loss + policy_loss + 0.5 * value_loss
 
-        if ep % SAVE_EVERY == 0 and ep > 0:
+    total_loss.backward()
+    optimizer.step()
 
-            torch.save(
-                net.state_dict(),
-                f"checkpoints/ckpt_{ep}.pt"
-            )
 
-        if ep % EVAL_EVERY == 0:
+def train(episodes=2000):
+    net = ConnectFourNet()
+    optimizer = optim.Adam(net.parameters(), lr=1e-3)
 
-            opponent = load_oldest_checkpoint(device)
+    # Note: Training against Minimax is much slower than self-play.
+    # Adjust 'episodes' down if you want a faster, less robust training cycle.
+    for ep in range(episodes):
+        epsilon = max(0.1, 1.0 - ep / (episodes * 0.9))
 
-            if opponent is None:
-                opponent = greedy_agent(net, device)
+        history, winner, nn_player = play_game(net, epsilon=epsilon)
+        train_step(net, optimizer, history, winner, nn_player)
 
-            score = evaluate(
-                greedy_agent(net, device),
-                [opponent],
-                20
-            )
-
+        if ep % 50 == 0:
             print(
-                f"ep {ep:,} "
-                f"— score vs oldest ckpt: {score:.2f}"
+                f"Episode {ep}/{episodes}, epsilon={epsilon:.3f} | Winner: {'NN' if winner == nn_player else ('Draw' if winner is None else 'Minimax')}"
             )
+
+    torch.save(net.state_dict(), "c4_net.pth")
+    print("Training complete. Model saved to c4_net.pth")
+    return net
 
 
 if __name__ == "__main__":

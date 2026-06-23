@@ -1,5 +1,6 @@
 from enum import Enum
 
+
 class MoveResult(Enum):
     INVALID_COL = "invalid_col"
     INVALID_PLAYER = "invalid_player"
@@ -8,39 +9,49 @@ class MoveResult(Enum):
     WIN = "win"
     DRAW = "draw"
 
-class Board():
+
+class Board:
     def __init__(self):
-        self.board = [[""] * 7 for _ in range(6)]
-        self.players = {0: "y", 1: "r"}
+        self.board = [[None] * 7 for _ in range(6)]
+        self.winner = None
 
     def get_board(self):
         return self.board
 
     def print_board(self):
         for i in range(6):
-            print(self.board[5-i])
+            print(self.board[5 - i])
 
     def make_move(self, player, col):
         if col < 0 or col > 6:
             return MoveResult.INVALID_COL
 
-        if player not in (0,1):
+        if player.upper() not in ["R", "Y"]:
             return MoveResult.INVALID_PLAYER
 
         for i in range(6):
-            if self.board[i][col] == "":
-                self.board[i][col] = self.players[player]
+            if self.board[i][col] is None:
+                self.board[i][col] = player
                 if self.has_win(player, col, i):
                     return MoveResult.WIN
-                if self.if_draw():
+                if self.has_draw():
                     return MoveResult.DRAW
 
                 return MoveResult.CONTINUE
         return MoveResult.COL_FULL
 
+    def is_legal_move(self, col):
+        if col < 0 or col > 6:
+            return MoveResult.INVALID_COL
+
+        if self.board[5][col] is not None:
+            return MoveResult.INVALID_COL
+
+        return MoveResult.CONTINUE
+
     def has_win(self, player, x, y):
         directions = [
-            (1,0),
+            (1, 0),
             (0, 1),
             (1, 1),
             (-1, 1),
@@ -50,35 +61,34 @@ class Board():
             count = 1
 
             i = 1
-            while 0 <= x + (dx * i) < 7 and 0 <= y + (dy * i) < 6 and self.board[y + (dy * i)][x + (dx * i)] == self.players[player]:
+            while (
+                0 <= x + (dx * i) < 7
+                and 0 <= y + (dy * i) < 6
+                and self.board[y + (dy * i)][x + (dx * i)] == player
+            ):
                 count += 1
                 i += 1
 
             i = 1
-            while 0 <= x - (dx * i) < 7 and 0 <= y - (dy * i) < 6 and self.board[y - (dy * i)][x - (dx * i)] == self.players[player]:
+            while (
+                0 <= x - (dx * i) < 7
+                and 0 <= y - (dy * i) < 6
+                and self.board[y - (dy * i)][x - (dx * i)] == player
+            ):
                 count += 1
                 i += 1
             if count >= 4:
-                return 1
+                self.winner = player
+                return True
 
-        return 0
+        return False
 
     def reset(self):
-        self.board = [[""] * 7 for _ in range(6)]
+        self.board = [[None] * 7 for _ in range(6)]
+        self.winner = None
 
-    def get_valid_cols(self):
-        return [c for c in range(7) if self.board[5][c] == ""]
+    def get_winner(self):
+        return self.winner
 
-    def if_draw(self):
-        return all(self.board[5][c] != "" for c in range(7))
-
-    def get_state(self, player):
-        state = []
-        me = self.players[player]
-        opp = self.players[1 - player]
-        for row in self.board:
-            for cell in row:
-                if cell == me: state.append(1.0)
-                elif cell == opp: state.append(-1.0)
-                else: state.append(0.0)
-        return state
+    def has_draw(self):
+        return all(self.board[5][c] is not None for c in range(7))

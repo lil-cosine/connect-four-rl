@@ -1,122 +1,144 @@
-import torch
-import torch.nn.functional as F
+import tkinter as tk
+
 from board import Board, MoveResult
-from network import ActorCriticNet
-from agent import greedy_agent
-import os
-import sys
+from minimax import best_move
 
-def pick_checkpoint():
-    checkpoints = sorted([f for f in os.listdir("./checkpoints") if f.startswith("ckpt_") and f.endswith(".pt")])
-    if not checkpoints:
-        print("No checkpoints found in current directory.")
-        sys.exit(1)
 
-    print("\nAvailable checkpoints:")
-    for i, ckpt in enumerate(checkpoints):
-        print(f"  [{i}] {ckpt}")
+class Connect4GUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Connect 4")
+        self.board = Board()
+        self.buttons = [[None] * 7 for _ in range(6)]
+        self.human = None
+        self.ai = None
+        self.player = "R"
+        self.show_start_screen()
 
-    while True:
-        try:
-            choice = int(input("\nPick a checkpoint number: "))
-            if 0 <= choice < len(checkpoints):
-                return 'checkpoints/' + checkpoints[choice]
-            print(f"Enter a number between 0 and {len(checkpoints)-1}")
-        except ValueError:
-            print("Enter a valid number.")
+    def show_start_screen(self):
+        self.start_frame = tk.Frame(self.root)
+        self.start_frame.grid(row=0, column=0)
+        tk.Label(self.start_frame, text="Play as:", font=("Arial", 16)).pack(pady=10)
+        tk.Button(
+            self.start_frame,
+            text="Red (Go First)",
+            font=("Arial", 14),
+            width=15,
+            command=lambda: self.start_game(human="R"),
+        ).pack(pady=5)
+        tk.Button(
+            self.start_frame,
+            text="Yellow (Go Second)",
+            font=("Arial", 14),
+            width=15,
+            command=lambda: self.start_game(human="Y"),
+        ).pack(pady=5)
 
-def load_agent(path):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    net = ActorCriticNet()
-    net.load_state_dict(torch.load(path, map_location=device))
-    net.to(device)
-    net.eval()
-    return greedy_agent(net, device)
-
-def print_board(board):
-    grid = board.get_board()
-    print("\n  1 2 3 4 5 6 7")
-    print(" +" + "-+-".join(["-"]*7) + "+")
-    for row in reversed(grid):
-        display = []
-        for cell in row:
-            if cell == "y":   display.append("🟡")
-            elif cell == "r": display.append("🔴")
-            else:             display.append("⚫")
-        print(" |" + "|".join(display) + "|")
-    print(" +" + "-+-".join(["-"]*7) + "+")
-    print("  1 2 3 4 5 6 7\n")
-
-def get_human_move(board):
-    valid = board.get_valid_cols()
-    while True:
-        try:
-            col = int(input("Your move (1-7): ")) - 1
-            if col in valid:
-                return col
-            elif 0 <= col <= 6:
-                print("That column is full, pick another.")
-            else:
-                print("Enter a number between 1 and 7.")
-        except ValueError:
-            print("Enter a valid number.")
-
-def play(human_player, ai_agent):
-    board = Board()
-    ai_player = 1 - human_player
-    current = 0
-
-    symbols = {human_player: "🟡 (you)", ai_player: "🔴 (AI)"}
-    print(f"\nYou are 🟡  |  AI is 🔴")
-    print(f"{'You go first!' if human_player == 0 else 'AI goes first!'}")
-    print_board(board)
-
-    while True:
-        if current == human_player:
-            col = get_human_move(board)
+    def start_game(self, human):
+        self.human = human
+        if human == "R":
+            self.ai = "Y"
         else:
-            print("AI is thinking...")
-            col = ai_agent.choose_col(board, ai_player)
-            print(f"AI plays column {col + 1}")
+            self.ai = "R"
 
-        result = board.make_move(current, col)
-        print_board(board)
+        self.start_frame.destroy()
+        self.build_board()
+        if self.player != self.human:
+            self.status.config(text="AI is thinking...")
+            self.root.after(300, self.ai_move)
+        else:
+            self.status.config(text=f"Your turn ({self.human})")
 
+    def build_board(self):
+        self.board_frame = tk.Frame(self.root)
+        self.board_frame.grid(row=0, column=0)
+        for j in range(6):
+            for i in range(7):
+                btn = tk.Button(
+                    self.board_frame,
+                    bg="white",
+                    font=("Arial", 20),
+                    width=4,
+                    height=2,
+                    command=lambda col=i: self.human_move(col),
+                )
+                btn.grid(row=j, column=i)
+                self.buttons[j][i] = btn
+        self.status = tk.Label(self.root, font=("Arial", 14))
+        self.status.grid(row=1, column=0, pady=10)
+
+    def update_ui(self):
+        state = self.board.get_board()
+        for r in range(6):
+            for c in range(7):
+                val = state[r][c]
+                ui_row = 5 - r
+                if val == "R":
+                    self.buttons[ui_row][c].config(bg="red")
+                elif val == "Y":
+                    self.buttons[ui_row][c].config(bg="yellow")
+                else:
+                    self.buttons[ui_row][c].config(bg="white")
+
+    def human_move(self, col):
+        if self.player != self.human:
+            return
+        result = self.board.make_move(self.human, col)
+        if result in [MoveResult.INVALID_COL, MoveResult.COL_FULL]:
+            return
+        self.update_ui()
+        if self.check_end(result):
+            return
+        self.player = self.ai
+        self.status.config(text="AI is thinking...")
+        self.root.update()
+        self.root.after(10, self.ai_move)
+
+    def ai_move(self):
+        move = best_move(self.board, self.ai)
+        result = self.board.make_move(self.ai, move)
+        self.update_ui()
+        if self.check_end(result):
+            return
+        self.player = self.human
+        self.status.config(text=f"Your turn ({self.human})")
+
+    def check_end(self, result):
         if result == MoveResult.WIN:
-            if current == human_player:
-                print("🎉 You win!")
-            else:
-                print("🤖 AI wins!")
-            return
+            winner = "Red" if self.board.get_winner() == "R" else "Yellow"
+            self.status.config(text=f"Player {winner} Wins!")
+            self.disable_board()
+            self.show_reset_button()
+            return True
         elif result == MoveResult.DRAW:
-            print("It's a draw!")
-            return
-        elif result in (MoveResult.COL_FULL, MoveResult.INVALID_COL):
-            print("Invalid move — something went wrong.")
-            return
+            self.status.config(text="It's a Draw!")
+            self.disable_board()
+            self.show_reset_button()
+            return True
+        return False
 
-        current = 1 - current
+    def show_reset_button(self):
+        tk.Button(
+            self.root, text="Play Again", font=("Arial", 14), command=self.reset
+        ).grid(row=2, column=0, pady=10)
 
-def main():
-    print("=== Connect Four vs AI ===")
-    ckpt = pick_checkpoint()
-    print(f"\nLoading {ckpt}...")
-    agent = load_agent(ckpt)
+    def reset(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        self.board.reset()
+        self.buttons = [[None] * 7 for _ in range(6)]
+        self.player = "R"
+        self.human = None
+        self.ai = None
+        self.show_start_screen()
 
-    while True:
-        while True:
-            order = input("\nDo you want to go first? (y/n): ").strip().lower()
-            if order in ("y", "n"):
-                break
-            print("Enter y or n.")
+    def disable_board(self):
+        for row in self.buttons:
+            for btn in row:
+                btn.config(state=tk.DISABLED)
 
-        human_player = 0 if order == "y" else 1
-        play(human_player, agent)
-
-        again = input("\nPlay again? (y/n): ").strip().lower()
-        if again != "y":
-            print("Thanks for playing!")
-            break
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = Connect4GUI(root)
+    root.mainloop()
