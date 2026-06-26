@@ -1,4 +1,5 @@
 import copy
+import math
 import random
 
 import torch
@@ -88,8 +89,11 @@ def play_game(net, epsilon=0.1):
             history.append((state, action, reward))
 
         else:
-            # Minimax turn
-            action = best_move(board, current)
+            if torch.rand(1).item() < 0.05:
+                action = random.choice(legal_moves)
+            else:
+                # Minimax turn
+                action = best_move(board, current)
             if action is None:
                 action = random.choice(legal_moves)
 
@@ -142,9 +146,9 @@ def train_step(net, optimizer, history, winner, nn_player):
     optimizer.step()
 
 
-def train(episodes=2000):
+def train(episodes=170_000):
     net = ConnectFourNet()
-    optimizer = optim.Adam(net.parameters(), lr=1e-3)
+    optimizer = optim.Adam(net.parameters(), lr=1e-5)
 
     # Note: Training against Minimax is much slower than self-play.
     # Adjust 'episodes' down if you want a faster, less robust training cycle.
@@ -156,7 +160,7 @@ def train(episodes=2000):
 
         if ep % 50 == 0:
             print(
-                f"Episode {ep}/{episodes}, epsilon={epsilon:.3f} | Winner: {'NN' if winner == nn_player else ('Draw' if winner is None else 'Minimax')}"
+                f"{math.floor((ep / episodes) * 100)}%: {ep}/{episodes}, epsilon={epsilon:.3f} | Winner: {'NN' if winner == nn_player else ('Draw' if winner is None else 'Minimax')}"
             )
 
     torch.save(net.state_dict(), "c4_net.pth")

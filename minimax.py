@@ -2,7 +2,7 @@ import copy
 
 from board import MoveResult
 
-MAX_DEPTH = 9
+MAX_DEPTH = 7
 
 
 def best_move(board, current_player):
