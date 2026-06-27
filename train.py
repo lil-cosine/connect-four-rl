@@ -1,6 +1,7 @@
 import copy
 import math
 import random
+import time
 
 import torch
 import torch.nn.functional as F
@@ -152,15 +153,23 @@ def train(episodes=170_000):
 
     # Note: Training against Minimax is much slower than self-play.
     # Adjust 'episodes' down if you want a faster, less robust training cycle.
+
+    last_time = 0
     for ep in range(episodes):
         epsilon = max(0.1, 1.0 - ep / (episodes * 0.9))
 
         history, winner, nn_player = play_game(net, epsilon=epsilon)
         train_step(net, optimizer, history, winner, nn_player)
 
-        if ep % 50 == 0:
+        if ep % 50 == 0 and ep != 0:
+            dt = (time.perf_counter() - last_time) / 50
+            last_time = time.perf_counter()
+            eta = dt * (episodes - ep)
+            hours, remainder = divmod(int(eta), 3600)
+            minutes, seconds = divmod(remainder, 60)
+
             print(
-                f"{math.floor((ep / episodes) * 100)}%: {ep}/{episodes}, epsilon={epsilon:.3f} | Winner: {'NN' if winner == nn_player else ('Draw' if winner is None else 'Minimax')}"
+                f"{math.floor((ep / episodes) * 100)}%: {ep}/{episodes}, epsilon={epsilon:.3f} | Winner: {'NN' if winner == nn_player else ('Draw' if winner is None else 'Minimax')} | ETA: {hours:02}h {minutes:02}m {seconds:02}s"
             )
 
     torch.save(net.state_dict(), "c4_net.pth")
