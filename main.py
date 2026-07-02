@@ -23,7 +23,6 @@ def nn_best_move(net, board, player):
 
     Returns:
         int: column index of the chosen move
-
     """
     legal_moves = get_legal_moves(board)
     if not legal_moves:
@@ -31,7 +30,9 @@ def nn_best_move(net, board, player):
     state = encode_board(board, player)
     with torch.no_grad():
         logits, _ = net(state)
-        mask = torch.full((42,), float("-inf"))
+        logits = logits.squeeze(0)  # (1, 7) -> (7,)
+        logits = torch.clamp(logits, -10, 10)
+        mask = torch.full((7,), float("-inf"))
         mask[legal_moves] = 0.0
         probs = torch.softmax(logits + mask, dim=0)
         return torch.argmax(probs).item()

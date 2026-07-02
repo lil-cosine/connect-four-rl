@@ -13,7 +13,6 @@ from network import ConnectFourNet
 
 
 def encode_board(board, current_player):
-    """Encode board as float tensor from current player's perspective."""
     flat = []
     for row in board.get_board():
         for cell in row:
@@ -30,19 +29,57 @@ def was_blocking_move(board, col, opponent):
     """Check if the move just played blocked the opponent from winning."""
     test_board = copy.deepcopy(board)
 
-    # Undo the move by setting the top-most piece in the column back to None
     for r in range(5, -1, -1):
         if test_board.get_board()[r][col] is not None:
             test_board.get_board()[r][col] = None
             break
 
-    # Check if the opponent could have won there
     result = test_board.make_move(opponent, col)
     return result == MoveResult.WIN
 
 
+def creates_threat(board, col, player):
+    """Check if the move just played created a 3-in-a-row with an open end."""
+    b = board.get_board()
+    directions = [(1, 0), (0, 1), (1, 1), (-1, 1)]
+
+    # Find the row the piece landed in
+    row = None
+    for r in range(5, -1, -1):
+        if b[r][col] == player:
+            row = r
+            break
+    if row is None:
+        return False
+
+    for dx, dy in directions:
+        count = 1
+        open_ends = 0
+
+        for sign in (1, -1):
+            i = 1
+            while True:
+                nx, ny = col + dx * sign * i, row + dy * sign * i
+                if 0 <= nx < 7 and 0 <= ny < 6:
+                    if b[ny][nx] == player:
+                        count += 1
+                        i += 1
+                    elif b[ny][nx] is None:
+                        open_ends += 1
+                        break
+                    else:
+                        break
+                else:
+                    break
+
+        if count == 3 and open_ends >= 1:
+            return True
+
+    return False
+
+
 def get_reward(result, board, col, player):
-    """Shaped reward: win, draw, block, or neutral."""
+    """Shaped reward: win, draw, block, threat, or neutral."""
     if result == MoveResult.WIN:
         return 1.0
     if result == MoveResult.DRAW:
@@ -51,19 +88,29 @@ def get_reward(result, board, col, player):
     opponent = "Y" if player == "R" else "R"
     if was_blocking_move(board, col, opponent):
         return 0.5
+
+    if creates_threat(board, col, player):
+        return 0.2
+
     return 0.0
 
 
-def play_game(net, epsilon=0.1):
-    """
-    Play one game where the Neural Network plays against the Minimax algorithm.
-    Returns a list of (state_tensor, action, reward) tuples for the NN + winner.
+def play_game(net, epsilon=0.1, minimax_depth=7):
+    """Play one game where the Neural Network plays against the Minimax algorithm.
+
+    Args:
+        net (ConnectFourNet): the network being trained
+        epsilon (float): exploration rate for epsilon-greedy action selection
+        minimax_depth (int): how many moves ahead minimax searches
+
+    Returns:
+        history (list): (state_tensor, action, reward) tuples for the NN's moves
+        winner (str | None): "R", "Y", or None for draw
+        nn_player (str): which colour the NN was playing
     """
     board = Board()
     history = []
     current = "R"
-
-    # Randomly assign the neural network to go first or second
     nn_player = random.choice(["R", "Y"])
 
     while True:
@@ -72,18 +119,30 @@ def play_game(net, epsilon=0.1):
         if current == nn_player:
             state = encode_board(board, current)
 
-            # Epsilon-greedy action selection
             if torch.rand(1).item() < epsilon:
                 action = random.choice(legal_moves)
             else:
                 logits, _ = net(state)
-                # Network outputs 42 values, but we only have 7 valid columns.
-                # Mask out all invalid moves (everything beyond index 6, plus full columns)
-                mask = torch.full((42,), float("-inf"))
-                mask[legal_moves] = 0.0
+                logits = logits.squeeze(0)
 
-                probs = torch.softmax(logits + mask, dim=0)
-                action = torch.multinomial(probs, 1).item()
+                # Clamp to prevent extreme values destabilising softmax
+                logits = torch.clamp(logits, -10, 10)
+
+                mask = torch.full((7,), float("-inf"))
+                mask[legal_moves] = 0.0
+                masked_logits = logits + mask
+
+                probs = torch.softmax(masked_logits, dim=0)
+
+                # Fallback if probabilities are still invalid
+                if (
+                    torch.isnan(probs).any()
+                    or torch.isinf(probs).any()
+                    or (probs < 0).any()
+                ):
+                    action = random.choice(legal_moves)
+                else:
+                    action = torch.multinomial(probs, 1).item()
 
             result = board.make_move(current, action)
             reward = get_reward(result, board, action, current)
@@ -93,20 +152,17 @@ def play_game(net, epsilon=0.1):
             if torch.rand(1).item() < 0.05:
                 action = random.choice(legal_moves)
             else:
-                # Minimax turn
-                action = best_move(board, current)
+                action = best_move(board, current, max_depth=minimax_depth)
             if action is None:
                 action = random.choice(legal_moves)
 
             result = board.make_move(current, action)
 
-        # Check for game end
         if result == MoveResult.WIN:
             return history, current, nn_player
         elif result == MoveResult.DRAW:
             return history, None, nn_player
 
-        # Switch turns
         current = "Y" if current == "R" else "R"
 
 
@@ -116,50 +172,62 @@ def train_step(net, optimizer, history, winner, nn_player):
         return
 
     optimizer.zero_grad()
-    total_loss = torch.tensor(0.0, requires_grad=True)
+    losses = []
 
     for state, action, shaped_reward in history:
-        # Final outcome reward from the neural network's perspective
         if winner is None:
-            outcome = 0.3  # draw
+            outcome = 0.3
         elif winner == nn_player:
             outcome = 1.0
         else:
             outcome = -1.0
 
-        # Blend shaped reward with final outcome
         reward = 0.6 * outcome + 0.4 * shaped_reward
 
         logits, value = net(state)
+        # logits shape: (1, 7) — squeeze to (7,) for indexing
+        logits = logits.squeeze(0)
+        value = value.squeeze()
+
         probs = torch.softmax(logits, dim=0)
         log_prob = torch.log(probs[action] + 1e-8)
 
-        advantage = reward - value.squeeze().detach()
+        advantage = reward - value.detach()
 
         policy_loss = -log_prob * advantage
-        value_loss = F.mse_loss(
-            value.squeeze(), torch.tensor(reward, dtype=torch.float32)
-        )
+        value_loss = F.mse_loss(value, torch.tensor(reward, dtype=torch.float32))
 
-        total_loss = total_loss + policy_loss + 0.5 * value_loss
+        losses.append(policy_loss + 0.5 * value_loss)
 
+    total_loss = torch.stack(losses).sum()
     total_loss.backward()
     optimizer.step()
 
 
 def train(episodes=170_000):
     net = ConnectFourNet()
-    optimizer = optim.Adam(net.parameters(), lr=1e-5)
+    optimizer = optim.Adam(net.parameters(), lr=5e-4)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10_000, gamma=0.95)
 
-    # Note: Training against Minimax is much slower than self-play.
-    # Adjust 'episodes' down if you want a faster, less robust training cycle.
+    last_time = time.perf_counter()
 
-    last_time = 0
     for ep in range(episodes):
-        epsilon = max(0.1, 1.0 - ep / (episodes * 0.9))
+        epsilon = max(0.05, 1.0 - ep / (episodes * 0.9))
 
-        history, winner, nn_player = play_game(net, epsilon=epsilon)
+        # Curriculum: start with shallow minimax, ramp up as training progresses
+        progress = ep / episodes
+        if progress < 0.2:
+            minimax_depth = 1
+        elif progress < 0.5:
+            minimax_depth = 5
+        else:
+            minimax_depth = 10
+
+        history, winner, nn_player = play_game(
+            net, epsilon=epsilon, minimax_depth=minimax_depth
+        )
         train_step(net, optimizer, history, winner, nn_player)
+        scheduler.step()
 
         if ep % 50 == 0 and ep != 0:
             dt = (time.perf_counter() - last_time) / 50
@@ -167,9 +235,15 @@ def train(episodes=170_000):
             eta = dt * (episodes - ep)
             hours, remainder = divmod(int(eta), 3600)
             minutes, seconds = divmod(remainder, 60)
-
+            winner_str = (
+                "NN"
+                if winner == nn_player
+                else ("Draw" if winner is None else "Minimax")
+            )
             print(
-                f"{math.floor((ep / episodes) * 100)}%: {ep}/{episodes}, epsilon={epsilon:.3f} | Winner: {'NN' if winner == nn_player else ('Draw' if winner is None else 'Minimax')} | ETA: {hours:02}h {minutes:02}m {seconds:02}s"
+                f"{math.floor((ep / episodes) * 100)}%: {ep}/{episodes}, "
+                f"epsilon={epsilon:.3f}, depth={minimax_depth} | "
+                f"Winner: {winner_str} | ETA: {hours:02}h {minutes:02}m {seconds:02}s"
             )
 
     torch.save(net.state_dict(), "c4_net.pth")

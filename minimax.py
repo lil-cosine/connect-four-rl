@@ -2,21 +2,21 @@ import copy
 
 from board import MoveResult
 
-MAX_DEPTH = 10
+MAX_DEPTH = 7
 
 MOVE_ORDER = [3, 2, 4, 1, 5, 0, 6]
 
 
-def best_move(board, current_player):
-    """Finds the best move of the current board
+def best_move(board, current_player, max_depth=MAX_DEPTH):
+    """Finds the best move for the current board state.
 
     Args:
         board (Board): the current board state
         current_player (char): the player making the move
+        max_depth (int): how many plies deep to search
 
     Returns:
         best (int): the column index of the best move
-
     """
     legal_moves = get_legal_moves(board)
     best = None
@@ -32,7 +32,9 @@ def best_move(board, current_player):
     for move in legal_moves:
         new_board = copy.deepcopy(board)
         new_board.make_move(current_player, move)
-        score = minimax_score(new_board, opponent, alpha=alpha, beta=beta)
+        score = minimax_score(
+            new_board, opponent, alpha=alpha, beta=beta, max_depth=max_depth
+        )
 
         if current_player == "R" and score > best_score:
             best_score = score
@@ -42,13 +44,19 @@ def best_move(board, current_player):
             best_score = score
             best = move
             beta = min(beta, best_score)
+
     return best
 
 
 def minimax_score(
-    board, current_player, depth=0, alpha=float("-inf"), beta=float("inf")
+    board,
+    current_player,
+    depth=0,
+    alpha=float("-inf"),
+    beta=float("inf"),
+    max_depth=MAX_DEPTH,
 ):
-    """Builds the minimax tree of the current move with alpha-beta pruning
+    """Builds the minimax tree with alpha-beta pruning.
 
     Args:
         board (Board): the current state of the board
@@ -56,12 +64,12 @@ def minimax_score(
         depth (int): current depth in the search tree
         alpha (float): best score the maximiser can guarantee
         beta (float): best score the minimiser can guarantee
+        max_depth (int): depth limit for this search
 
     Returns:
         score (int): the heuristic value of the board position
-
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_depth:
         return 0
 
     depth += 1
@@ -81,7 +89,10 @@ def minimax_score(
         for move in legal_moves:
             new_board = copy.deepcopy(board)
             new_board.make_move(current_player, move)
-            val = max(val, minimax_score(new_board, opponent, depth + 1, alpha, beta))
+            val = max(
+                val,
+                minimax_score(new_board, opponent, depth + 1, alpha, beta, max_depth),
+            )
             alpha = max(alpha, val)
             if alpha >= beta:
                 break  # Beta cutoff
@@ -92,7 +103,10 @@ def minimax_score(
         for move in legal_moves:
             new_board = copy.deepcopy(board)
             new_board.make_move(current_player, move)
-            val = min(val, minimax_score(new_board, opponent, depth + 1, alpha, beta))
+            val = min(
+                val,
+                minimax_score(new_board, opponent, depth + 1, alpha, beta, max_depth),
+            )
             beta = min(beta, val)
             if alpha >= beta:
                 break  # Alpha cutoff
@@ -100,15 +114,13 @@ def minimax_score(
 
 
 def get_legal_moves(board):
-    """Gets the list of legal moves for the current board, ordered centre-first
-    to maximise alpha-beta pruning efficiency.
+    """Gets legal moves ordered centre-first to maximise pruning efficiency.
 
     Args:
         board (Board): the current state of the board
 
     Returns:
         legal_moves (list[int]): column indices of all legal moves
-
     """
     return [
         col for col in MOVE_ORDER if board.is_legal_move(col) == MoveResult.CONTINUE
